@@ -1,0 +1,72 @@
+# Runs every hour (and when you press "Run workflow"): pulls jobs, filters them, saves the results.
+name: Update jobs
+
+on:
+  schedule:
+    - cron: "17 * * * *"      # minute 17 of every hour (GitHub may start it a few minutes late)
+  workflow_dispatch:           # the manual "Run workflow" button
+
+permissions:
+  contents: write              # lets the workflow save results back to this repository
+
+concurrency:
+  group: update-jobs           # never run two at once
+  cancel-in-progress: false
+
+jobs:
+  update:
+    runs-on: ubuntu-latest
+    timeout-minutes: 180       # the very first run reads everything (about 45 min); later runs take ~5
+    steps:
+      - name: Get the code
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      # The full jobs.json (28 MB) lives on a separate branch called "data" so it never bloats the main branch.
+      - name: Load previously saved jobs (if any)
+        run: |
+          if git ls-remote --exit-code --heads origin data > /dev/null 2>&1; then
+            git fetch --depth 1 origin data
+            git show FETCH_HEAD:jobs.json > jobs.json
+            echo "Loaded saved jobs.json"
+          else
+            echo "No saved jobs yet - first run, reading everything."
+          fi
+
+      - name: Pull jobs from the firms
+        run: python pull_jobs.py
+
+      - name: Sort into ELIGIBLE / NEEDS_REVIEW / NOT_ELIGIBLE
+        run: python filter_jobs.py
+
+      - name: Make the small file for the website
+        run: python make_site_data.py
+
+      - name: Save website file to the main branch
+        run: |
+          git config user.name "job-board-bot"
+          git config user.email "job-board-bot@users.noreply.github.com"
+          git add docs/jobs.json
+          if git diff --cached --quiet; then
+            echo "Website file unchanged."
+          else
+            git commit -m "Update jobs"
+            git push
+          fi
+
+      - name: Save the full jobs.json to the data branch (history is replaced each time)
+        run: |
+          mkdir publish
+          cp jobs.json publish/
+          cd publish
+          git init -q -b data
+          git config user.name "job-board-bot"
+          git config user.email "job-board-bot@users.noreply.github.com"
+          git add jobs.json
+          git commit -q -m "Full jobs data"
+          git remote add origin "https://x-access-token:${{ github.token }}@github.com/${{ github.repository }}.git"
+          git push -f origin data
